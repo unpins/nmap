@@ -57,7 +57,10 @@ The [Releases](https://github.com/unpins/nmap/releases) page has standalone bina
   overrides the Makefile `LDFLAGS` that carry nmap's in-tree `-L` search paths.
   And on macOS, where `pkgsStatic.lua` installs only a `liblua.dylib` (no
   static archive), nmap is pointed at its own bundled liblua so the scripting
-  engine links statically and the binary stays free of non-system libraries.
+  engine links statically. macOS also folds the C++ runtime (`libc++`) in as a
+  static archive, since nmap is a C++ program and the dynamic system `libc++`
+  isn't on the portable-binary allow-list. Both keep the binary free of
+  non-system libraries.
 - The data files (`nmap-services`, `nmap-os-db`, `nmap-service-probes`, the NSE
   scripts) ship as a companion archive. nmap finds them next to the binary —
   its search tries `<exe-dir>/../share/nmap` before the compiled path — so no
