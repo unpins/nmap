@@ -1,12 +1,12 @@
 # nmap
 
-Standalone build of [nmap](https://nmap.org/).
+[nmap](https://nmap.org/) as a single self-contained binary, built natively for Linux and macOS.
 
 [![CI](https://github.com/unpins/nmap/actions/workflows/nmap.yml/badge.svg)](https://github.com/unpins/nmap/actions)
 ![Linux](https://img.shields.io/badge/Linux-✓-success?logo=linux&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-✓-success?logo=apple&logoColor=white)
 
-Part of the [unpins](https://unpins.org) project — native single-binary builds with no third-party runtime dependencies.
+Part of the [unpins](https://unpins.org) catalog; install it with [`unpin`](https://github.com/unpins/unpin): `unpin install nmap`.
 
 ## Usage
 
@@ -26,6 +26,10 @@ nmap's data files — the service/OS-fingerprint databases and the full NSE
 script library — are fetched alongside the binary, so `-sC`/`-sV`/`-O` and the
 scripting engine work out of the box.
 
+## Man pages
+
+`nmap.1` is embedded in the binary — read it with `unpin man nmap`.
+
 ## Build locally
 
 ```bash
@@ -44,10 +48,6 @@ The first invocation will offer to add the [unpins.cachix.org](https://unpins.ca
 ## Manual download
 
 The [Releases](https://github.com/unpins/nmap/releases) page has standalone binaries for manual download, paired with a `nmap-<version>-data` archive holding the script and fingerprint data.
-
-## Man pages
-
-`nmap.1` is embedded in the binary — read it with `unpin man nmap`.
 
 ## Build notes
 
