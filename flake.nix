@@ -30,6 +30,7 @@
   outputs = { self, unpins-lib }:
     unpins-lib.lib.mkStandaloneFlake {
       inherit self;
+      dnsFallback = true; # resolves hostnames; opt into the Android DNS fallback
       name = "nmap";
       optimize = { gc = false; };
       # nmap needs its data files at runtime (nmap-services, nmap-os-db,
