@@ -32,6 +32,24 @@
       inherit self;
       dnsFallback = true; # resolves hostnames; opt into the Android DNS fallback
       name = "nmap";
+      # Build via the unpin-llvm engine so nmap links the same engine-built
+      # openssl/zlib/… closure the rest of the catalog does. useEngine kicks in
+      # on linux/darwin (single binary → self-fold N=1, no multicall block).
+      engine = "unpin-llvm";
+
+      # Two dead store-path strings survive in the static binary and must be
+      # scrubbed to keep the 0-external-ref invariant:
+      #   - lua-static: liblua's compiled-in LUA_PATH_DEFAULT/LUA_CPATH_DEFAULT
+      #     (`…/lua/5.4/?.lua`, `?.so`). nmap runs its own bundled nselib and a
+      #     static binary can never dlopen a Lua C module, so these are unused.
+      #   - nmap-static: the compiled-in NMAPDATADIR (`…/share/nmap`) pointing
+      #     at the base build. nmap looks up its data dir exe-relative first,
+      #     and the data ships as the companion sidecar, so this baked fallback
+      #     is never reached. (unpinEmbedWrap copies the binary to a fresh store
+      #     path, turning that baked self-path into an external cross-ref.)
+      # Name-substring patterns, arch-agnostic; darwin has no external lua ref
+      # (bundled liblua) so only the nmap-static one matches there.
+      removeReferences = [ "lua-static" "nmap-static" ];
       optimize = { gc = false; };
       # nmap needs its data files at runtime (nmap-services, nmap-os-db,
       # nmap-service-probes, the NSE scripts). They ship as the companion
@@ -59,6 +77,19 @@
             '';
           });
           isDarwin = pkgs.pkgsStatic.stdenv.hostPlatform.isDarwin;
+          # libdnet-stripped's bundled (pre-generated) configure probes for
+          # Linux PF_PACKET with a nested function inside main()
+          # (`int foo() { return ETH_P_ALL; }`) — a GNU C extension gcc accepts
+          # but clang rejects ("function definition is not allowed here"). Under
+          # the engine (clang) the probe fails to compile → "no" → configure
+          # aborts with "Ethernet support not found for this system". Rewrite it
+          # to the valid form the sibling arp probe already uses
+          # (`int foo = SIOCGARP;`) so the macro is referenced, not called.
+          # No-op on darwin (Linux-only probe; headers absent there anyway).
+          fixLibdnetPfPacket = ''
+            substituteInPlace libdnet-stripped/configure \
+              --replace 'int foo() { return ETH_P_ALL; }' 'int foo = ETH_P_ALL;'
+          '';
         in
         (pkgs.pkgsStatic.nmap.override { liblinear = liblinearStatic; }).overrideAttrs (oa: {
           # This package ships the nmap scanner. nmap's tree also builds Ncat
@@ -73,20 +104,37 @@
           # system-lib allow-list. The included liblua compiles into a
           # `liblua.a` and links statically, leaving only /usr/lib system libs.
           # Linux and the musl crosses keep the external lua-static (it ships a
-          # real `liblua.a`), so their drv hashes — already built and verified —
-          # stay byte-identical.
+          # real `liblua.a`), so the darwin-only flag never reaches them.
           configureFlags = oa.configureFlags ++ [ "--without-ncat" "--without-nping" ]
-            ++ pkgs.lib.optionals isDarwin [ "--with-liblua=included" ];
+            ++ pkgs.lib.optionals isDarwin [
+              "--with-liblua=included"
+              # Force the bundled sub-libs (libdnet-stripped, libpcap, libssh2,
+              # libz — all pulled in via AC_CONFIG_SUBDIRS, so this arg is
+              # forwarded to each) to build static-only on darwin. Under the
+              # engine the linker is ld64.lld, whose `--version` advertises
+              # "compatible with GNU linkers"; libtool's GNU-ld probe trips on
+              # that and emits ELF `-Wl,-soname` for shared libs, which ld64
+              # rejects ("unknown argument '-soname'"). We only ever link the
+              # static archives anyway, so skip the broken shared build. Use the
+              # `--enable-shared=no` spelling (not `--disable-shared`, which
+              # mkStandaloneFlake's filterEnableStaticOnDarwin strips on darwin
+              # to dodge the `--enable-static → LDFLAGS=-static` probe breakage).
+              # Linux keeps building the shared libs (ld/lld there accept
+              # -soname), so this stays darwin-only.
+              "--enable-shared=no"
+            ];
+          # libdnet-stripped PF_PACKET probe fix (see `fixLibdnetPfPacket`).
+          # Applied unconditionally — the whole package rebuilds under the
+          # engine, so there is no cached Linux drv hash to preserve.
+          postPatch = (oa.postPatch or "") + fixLibdnetPfPacket;
           # nixpkgs' nmap hardcodes `CC=<prefix>gcc` in makeFlags whenever
-          # build≠host (always true under pkgsStatic). On Linux `<prefix>gcc`
-          # exists, but on darwin the toolchain is clang and there is no
-          # `<prefix>gcc`, so every sub-make dies with "command not found"
-          # (Error 127). Append the generic `<prefix>cc` (clang on darwin, gcc
-          # on Linux); the later make-command-line assignment wins. Darwin-only
-          # so the Linux build keeps its cache.
+          # build≠host (always true under pkgsStatic). The unpin-llvm engine is
+          # clang-only on *every* target — there is no `<prefix>gcc` — so every
+          # sub-make would die with "command not found" (Error 127). Append the
+          # generic `<prefix>cc` (the engine clang wrapper, present on all
+          # platforms); the later make-command-line assignment wins.
           makeFlags = (oa.makeFlags or [ ])
-            ++ pkgs.lib.optionals isDarwin
-              [ "CC=${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc" ];
+            ++ [ "CC=${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc" ];
           postFixup = "";
         }
         # The bundled liblua's Makefile bakes the archive operation into its
@@ -95,12 +143,13 @@
         # (binary only, no operation), so the rule expands to `<prefix>-ar
         # liblua.a …` — no operation letter — and `ar` just dumps its usage and
         # fails. (x86_64-darwin is build==host, leaves AR alone, and builds
-        # fine.) Move the operation into the rule so it works both ways. Added
-        # *only* on darwin: the stock derivation has no `postPatch`, so setting
-        # it even to "" on Linux/crosses would perturb their (already built and
-        # verified) drv hashes.
+        # fine.) Move the operation into the rule so it works both ways.
+        # Darwin-only: the Linux/cross builds use the external lua-static and
+        # never touch the bundled liblua Makefile.
         // pkgs.lib.optionalAttrs isDarwin {
-          postPatch = (oa.postPatch or "") + ''
+          # optionalAttrs' postPatch REPLACES (shadows) the base one, so repeat
+          # the shared libdnet fix here before the darwin-only liblua AR fix.
+          postPatch = (oa.postPatch or "") + fixLibdnetPfPacket + ''
             substituteInPlace liblua/Makefile \
               --replace 'AR= ar rcu' 'AR= ar' \
               --replace '$(AR) $@' '$(AR) rcu $@'
