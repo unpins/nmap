@@ -32,6 +32,8 @@
       inherit self;
       dnsFallback = true; # resolves hostnames; opt into the Android DNS fallback
       name = "nmap";
+      smoke = [ "--version" ];
+      smokePattern = "^Nmap version [0-9]+\\.[0-9]+";
       # Build via the unpin-llvm engine so nmap links the same engine-built
       # openssl/zlib/… closure the rest of the catalog does. useEngine kicks in
       # on linux/darwin (single binary → self-fold N=1, no multicall block).
