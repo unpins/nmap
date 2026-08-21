@@ -22,9 +22,9 @@ To install it onto your PATH:
 unpin install nmap
 ```
 
-nmap's data files — the service/OS-fingerprint databases and the full NSE
-script library — are fetched alongside the binary, so `-sC`/`-sV`/`-O` and the
-scripting engine work out of the box.
+nmap's data files — the service and OS-fingerprint databases and the full NSE
+script library — are inside the binary, so `-sC`/`-sV`/`-O` and the scripting
+engine work out of the box with nothing else to download.
 
 ## Man pages
 
@@ -47,7 +47,7 @@ The first invocation will offer to add the [unpins.cachix.org](https://unpins.ca
 
 ## Manual download
 
-The [Releases](https://github.com/unpins/nmap/releases) page has standalone binaries for manual download, paired with a `nmap-<version>-data` archive holding the script and fingerprint data.
+The [Releases](https://github.com/unpins/nmap/releases) page has standalone binaries for manual download.
 
 ## Build notes
 
@@ -62,9 +62,9 @@ The [Releases](https://github.com/unpins/nmap/releases) page has standalone bina
   isn't on the portable-binary allow-list. Both keep the binary free of
   non-system libraries.
 - The data files (`nmap-services`, `nmap-os-db`, `nmap-service-probes`, the NSE
-  scripts) ship as a companion archive. nmap finds them next to the binary —
-  its search tries `<exe-dir>/../share/nmap` before the compiled path — so no
-  lookup patch is needed.
+  scripts and `nselib`) are carried inside the binary and read from there. Your
+  own copies still win: `--datadir`, `$NMAPDIR` and `~/.nmap` are searched
+  first, in exactly the order upstream nmap documents.
 - **Windows** is not shipped: nmap's packet capture requires the
   [Npcap](https://npcap.com/) kernel driver, loaded at runtime from a separate
   signed driver install, which can't live inside a self-contained binary (the

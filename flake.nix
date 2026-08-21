@@ -28,37 +28,146 @@
   # and the link fails on `-lnsock -lnbase -llua`. The cross targets are
   # unaffected (they carry the lld flags via NIX_CFLAGS_LINK, which appends).
   outputs = { self, unpins-lib }:
+    let
+      ulib = unpins-lib.lib;
+
+      # Mount point of the embedded data tree. nmap composes every data path as
+      # "<datadir>/<file>", so this is exactly the value NMAPDATADIR takes; the
+      # VFS root itself is this plus the trailing slash.
+      vfsRoot = "/__unpins_nmapdata__";
+
+      # Carry nmap's data tree (nse_main.lua, the NSE scripts and nselib,
+      # nmap-services, nmap-os-db, nmap-service-probes, nmap-mac-prefixes)
+      # INSIDE the binary, served by the shared unpin-vfs core from the ZIP the
+      # build appends at EOF. Without it nmap silently loses NSE, -sV, -O and
+      # service names and degrades to a raw port scanner: `unpinEmbedWrap`
+      # rebuilds $out from scratch and keeps only bin/ and share/man, so any
+      # data tree left on disk is discarded by construction.
+      #
+      # Nothing in nmap's lookup path needs patching, and that is why this is
+      # cheap. Every read of the tree goes through plain libc, which is exactly
+      # the call set the VFS fronts: `file_is_readable` is stat+access
+      # (nbase/nbase_misc.c), the databases are fopen (services.cc, protocols.cc,
+      # osscan.cc, service_scan.cc, MACLookup.cc), NSE lists directories with
+      # opendir/readdir (nse_fs.cc) and loads .nse/.lua through luaL_loadfile,
+      # itself fopen. The single std::ifstream in the tree (nmap_dns.cc) reads
+      # /etc/hosts -- a real system file, outside the mount.
+      #
+      # Reaching the mount is one build variable: NMAPDATADIR is
+      # `-DNMAPDATADIR=\"$(nmapdatadir)\"` in Makefile.in. Pointing it at the
+      # mount leaves nmap's documented search order untouched -- --datadir,
+      # $NMAPDIR, ~/.nmap, the exe dir, <exe>/../share/nmap, and only then the
+      # embedded copy as the last resort. A user's own data files still win,
+      # exactly as upstream documents.
+      injectVfs = pkgs: drv: drv.overrideAttrs (old:
+        let
+          lib = pkgs.lib;
+          isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
+        in
+        {
+          postPatch = (old.postPatch or "") + ''
+            echo "==> inject unpin-vfs core (vfs.c + miniz.c)"
+            cp ${ulib.vfsCore}/*.c ${ulib.vfsCore}/*.h .
+
+            echo "==> point the compiled-in NMAPDATADIR at the VFS mount"
+            substituteInPlace Makefile.in \
+              --replace-fail '-DNMAPDATADIR=\"$(nmapdatadir)\"' '-DNMAPDATADIR=\"${vfsRoot}\"'
+
+            echo "==> put the VFS objects on nmap's link line"
+            substituteInPlace Makefile.in \
+              --replace-fail '-o $@ $(OBJS) main.o $(LIBS)' \
+                '-o $@ $(OBJS) main.o vfs.o miniz.o unpin_zstd.o $(LIBS)'
+          '';
+
+          # After configure, for the same reason zsh does it there: the `--wrap`
+          # flags must not reach the conftest links, which have no vfs.o and
+          # would fail on an undefined __wrap_fopen -- silently mis-detecting
+          # features rather than erroring.
+          preBuild = (old.preBuild or "") + ''
+            echo "==> pre-compile the unpin-vfs objects"
+            # -DUNPIN_VFS_DLSYM (darwin): the binding where vfs.c DEFINES the
+            # libc entry points and reaches the real ones through
+            # dlsym(RTLD_NEXT). Bare __APPLE__ would instead select the rename
+            # binding, which needs an IR-rewrite pass this build has no
+            # equivalent of. It is linker-global, which is fine here: nmap emits
+            # no multicall module (no `multicall` block), so nothing folds this
+            # binary together with another.
+            UNPIN_VFS_DEFS="-DUNPIN_VFS_DIRS -DUNPIN_VFS_SELF -DUNPIN_VFS_ROOT=\"${vfsRoot}/\"${lib.optionalString isDarwin " -DUNPIN_VFS_DLSYM"}"
+            MINIZ_DEFS="-DMINIZ_USE_ZSTD -DMINIZ_NO_TIME -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES"
+            $CC -O2 -c vfs.c        $UNPIN_VFS_DEFS $MINIZ_DEFS -o vfs.o
+            $CC -O2 -c miniz.c      -D_GNU_SOURCE -w $MINIZ_DEFS -o miniz.o
+            $CC -O2 -c unpin_zstd.c -D_GNU_SOURCE -w $MINIZ_DEFS -DUNPIN_ZSTD_VENDORED -o unpin_zstd.o
+          '' + lib.optionalString (!isDarwin) ''
+            echo "==> Linux: route nmap's libc file calls through the VFS shims"
+            # Via NIX_LDFLAGS, not the makefile: nmap stuffs its own -L paths
+            # into LDFLAGS and the cc-wrapper appends these to the final link
+            # regardless. `--wrap` resolves at final link, so it reaches the
+            # members of liblua.a/libnbase.a too -- which matters, since
+            # luaL_loadfile (all of NSE) lives in liblua.
+            export NIX_LDFLAGS="$NIX_LDFLAGS --wrap=open --wrap=stat --wrap=lstat --wrap=access --wrap=opendir --wrap=readdir --wrap=closedir --wrap=fopen"
+          '' + lib.optionalString (!isDarwin && pkgs.stdenv.hostPlatform.is32bit) ''
+            echo "==> 32-bit musl is _REDIR_TIME64: wrap the __stat_time64 aliases too"
+            export NIX_LDFLAGS="$NIX_LDFLAGS --wrap=__stat_time64 --wrap=__lstat_time64"
+          '';
+
+          # macOS needs no extra link step: under -DUNPIN_VFS_DLSYM vfs.c
+          # DEFINES open/stat/..., and a definition in a linked object shadows
+          # the libSystem import for every reference.
+        });
+    in
     unpins-lib.lib.mkStandaloneFlake {
       inherit self;
       dnsFallback = true; # resolves hostnames; opt into the Android DNS fallback
       name = "nmap";
-      smoke = [ "--version" ];
-      smokePattern = "^Nmap version [0-9]+\\.[0-9]+";
+      # `--version` was a tautology: it never opens the data tree, so it stayed
+      # green through the whole window in which the shipped binary had no NSE
+      # at all. `--script-help` is the cheapest call that actually exercises
+      # the embedded tree end to end -- it loads nse_main.lua, walks scripts/
+      # and pulls nselib modules, and fails if any of that is unreachable.
+      # The pattern deliberately does not mention the binary name: the smoke
+      # job runs the artifact under a renamed path on some targets.
+      smoke = [ "--script-help=http-git" ];
+      smokePattern = "^Categories: ";
       # Build via the unpin-llvm engine so nmap links the same engine-built
-      # openssl/zlib/… closure the rest of the catalog does. useEngine kicks in
-      # on linux/darwin (single binary → self-fold N=1, no multicall block).
+      # openssl/zlib/… closure the rest of the catalog does. No `multicall`
+      # block: nmap ships one binary and nothing needs its bitcode module, so
+      # `wantModule` (nix-lib/flake.nix:5098 — `multicall != null && …`) stays
+      # false and no fold pass runs at all. That is NOT a "self-fold N=1", which
+      # is what this comment used to claim.
       engine = "unpin-llvm";
 
-      # Two dead store-path strings survive in the static binary and must be
-      # scrubbed to keep the 0-external-ref invariant:
-      #   - lua-static: liblua's compiled-in LUA_PATH_DEFAULT/LUA_CPATH_DEFAULT
-      #     (`…/lua/5.4/?.lua`, `?.so`). nmap runs its own bundled nselib and a
-      #     static binary can never dlopen a Lua C module, so these are unused.
-      #   - nmap-static: the compiled-in NMAPDATADIR (`…/share/nmap`) pointing
-      #     at the base build. nmap looks up its data dir exe-relative first,
-      #     and the data ships as the companion sidecar, so this baked fallback
-      #     is never reached. (unpinEmbedWrap copies the binary to a fresh store
-      #     path, turning that baked self-path into an external cross-ref.)
-      # Name-substring patterns, arch-agnostic; darwin has no external lua ref
-      # (bundled liblua) so only the nmap-static one matches there.
-      removeReferences = [ "lua-static" "nmap-static" ];
+      # One dead store-path string survives in the static binary and must be
+      # scrubbed to keep the 0-external-ref invariant: liblua's compiled-in
+      # LUA_PATH_DEFAULT/LUA_CPATH_DEFAULT (`…/lua/5.4/?.lua`, `?.so`). nmap
+      # runs its own bundled nselib and a static binary can never dlopen a Lua
+      # C module, so these are unused. Name-substring pattern, arch-agnostic.
+      #
+      # `nmap-static` used to be in this list too, for the compiled-in
+      # NMAPDATADIR (`…/share/nmap`) pointing at the base build — a baked
+      # self-path that unpinEmbedWrap turns into an external cross-ref when it
+      # copies the binary to a fresh store path. NMAPDATADIR is the VFS mount
+      # now, so that string is not in the binary at all; measured with the
+      # entry dropped, the artifact still carries zero references.
+      removeReferences = [ "lua-static" ];
       optimize = { gc = false; };
-      # nmap needs its data files at runtime (nmap-services, nmap-os-db,
-      # nmap-service-probes, the NSE scripts). They ship as the companion
-      # `nmap-<ver>-data.tar.zst`; nmap finds them next to the binary because
-      # its data search tries `<exe-dir>/../share/nmap` before the compiled
-      # NMAPDATADIR, so no lookup patch is needed.
-      package_data = true;
+      # The data tree rides the binary (see `injectVfs`). It used to ship as
+      # the companion `nmap-<ver>-data.tar.zst` via `package_data`, which is
+      # gone: that option publishes `result/share`, and `unpinEmbedWrap` keeps
+      # only `share/man` there, so since the move to the engine the tarball was
+      # empty of everything that matters and the released binary would have had
+      # no NSE at all.
+      runtimeEmbed = {
+        native = pkgs: base: {
+          man = true;
+          # Stage the CONTENTS of share/nmap at the ZIP root: that root is what
+          # NMAPDATADIR names, and nmap asks for tree-relative paths
+          # ("nse_main.lua", "scripts/http-git.nse", "nselib/http.lua").
+          runtimeStage = ''
+            cp -a ${base}/share/nmap/. "$__unpin_stage/"
+            chmod -R u+w "$__unpin_stage"
+          '';
+        };
+      };
       build = pkgs:
         let
           liblinearStatic = pkgs.pkgsStatic.liblinear.overrideAttrs (_: {
@@ -93,7 +202,8 @@
               --replace 'int foo() { return ETH_P_ALL; }' 'int foo = ETH_P_ALL;'
           '';
         in
-        (pkgs.pkgsStatic.nmap.override { liblinear = liblinearStatic; }).overrideAttrs (oa: {
+        injectVfs pkgs
+        ((pkgs.pkgsStatic.nmap.override { liblinear = liblinearStatic; }).overrideAttrs (oa: {
           # This package ships the nmap scanner. nmap's tree also builds Ncat
           # and Nping, but the single-binary release publishes only `bin/nmap`,
           # so skip them — leaner build, smaller cross/Windows surface.
@@ -173,6 +283,6 @@
             export LDFLAGS="-Wl,-search_paths_first ''${LDFLAGS:-}"
             export LIBS="-lc++abi ''${LIBS:-}"
           '';
-        });
+        }));
     };
 }
