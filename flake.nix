@@ -83,6 +83,15 @@
           # flags must not reach the conftest links, which have no vfs.o and
           # would fail on an undefined __wrap_fopen -- silently mis-detecting
           # features rather than erroring.
+          #
+          # -DUNPIN_WRAP_TIME64 (32-bit musl) is spliced into UNPIN_VFS_DEFS
+          # rather than appended by the 32-bit block below, which runs after
+          # that compile and so would never reach vfs.c. Getting it wrong is not
+          # a warning: the --wrap flag then asks the linker for a shim nothing
+          # compiled, and i686/armv7l die on `undefined symbol:
+          # __wrap___stat_time64`. This note lives at Nix level on purpose -- a
+          # comment inside the shell string below is build-script text, so it
+          # would re-hash every target instead of the two it describes.
           preBuild = (old.preBuild or "") + ''
             echo "==> pre-compile the unpin-vfs objects"
             # -DUNPIN_VFS_DLSYM (darwin): the binding where vfs.c DEFINES the
@@ -92,7 +101,7 @@
             # equivalent of. It is linker-global, which is fine here: nmap emits
             # no multicall module (no `multicall` block), so nothing folds this
             # binary together with another.
-            UNPIN_VFS_DEFS="-DUNPIN_VFS_DIRS -DUNPIN_VFS_SELF -DUNPIN_VFS_ROOT=\"${vfsRoot}/\"${lib.optionalString isDarwin " -DUNPIN_VFS_DLSYM"}"
+            UNPIN_VFS_DEFS="-DUNPIN_VFS_DIRS -DUNPIN_VFS_SELF -DUNPIN_VFS_ROOT=\"${vfsRoot}/\"${lib.optionalString isDarwin " -DUNPIN_VFS_DLSYM"}${lib.optionalString (!isDarwin && pkgs.stdenv.hostPlatform.is32bit) " -DUNPIN_WRAP_TIME64"}"
             MINIZ_DEFS="-DMINIZ_USE_ZSTD -DMINIZ_NO_TIME -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES"
             $CC -O2 -c vfs.c        $UNPIN_VFS_DEFS $MINIZ_DEFS -o vfs.o
             $CC -O2 -c miniz.c      -D_GNU_SOURCE -w $MINIZ_DEFS -o miniz.o
@@ -107,6 +116,7 @@
             export NIX_LDFLAGS="$NIX_LDFLAGS --wrap=open --wrap=stat --wrap=lstat --wrap=access --wrap=opendir --wrap=readdir --wrap=closedir --wrap=fopen"
           '' + lib.optionalString (!isDarwin && pkgs.stdenv.hostPlatform.is32bit) ''
             echo "==> 32-bit musl is _REDIR_TIME64: wrap the __stat_time64 aliases too"
+            # Pairs with -DUNPIN_WRAP_TIME64 above, which compiles the shims.
             export NIX_LDFLAGS="$NIX_LDFLAGS --wrap=__stat_time64 --wrap=__lstat_time64"
           '';
 
