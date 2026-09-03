@@ -76,53 +76,71 @@
             echo "==> put the VFS objects on nmap's link line"
             substituteInPlace Makefile.in \
               --replace-fail '-o $@ $(OBJS) main.o $(LIBS)' \
-                '-o $@ $(OBJS) main.o vfs.o miniz.o unpin_zstd.o $(LIBS)'
+                '-o $@ $(OBJS) main.o vfs.o miniz.o unpin_zstd.o ${
+                   lib.optionalString (!isDarwin) "liblua_vfs.a "}$(LIBS)'
           '';
 
-          # After configure, for the same reason zsh does it there: the `--wrap`
-          # flags must not reach the conftest links, which have no vfs.o and
-          # would fail on an undefined __wrap_fopen -- silently mis-detecting
-          # features rather than erroring.
+          # Compiled after configure, not before: the VFS objects must exist by
+          # the time anything links, and nothing here may perturb the conftest
+          # links (they carry no vfs.o).
           #
-          # -DUNPIN_WRAP_TIME64 (32-bit musl) is spliced into UNPIN_VFS_DEFS
-          # rather than appended by the 32-bit block below, which runs after
-          # that compile and so would never reach vfs.c. Getting it wrong is not
-          # a warning: the --wrap flag then asks the linker for a shim nothing
-          # compiled, and i686/armv7l die on `undefined symbol:
-          # __wrap___stat_time64`. This note lives at Nix level on purpose -- a
-          # comment inside the shell string below is build-script text, so it
-          # would re-hash every target instead of the two it describes.
+          # 32-bit musl needs no special casing any more. It is _REDIR_TIME64,
+          # so <sys/stat.h> asm-renames stat/lstat to __stat_time64/
+          # __lstat_time64 and the program references THOSE -- which the shared
+          # IR rename already maps onto unpinvfs_stat/lstat. The old
+          # -DUNPIN_WRAP_TIME64 existed only to compile matching __wrap_ shims,
+          # and there is no --wrap left to feed.
           preBuild = (old.preBuild or "") + ''
             echo "==> pre-compile the unpin-vfs objects"
-            # -DUNPIN_VFS_DLSYM (darwin): the binding where vfs.c DEFINES the
-            # libc entry points and reaches the real ones through
-            # dlsym(RTLD_NEXT). Bare __APPLE__ would instead select the rename
-            # binding, which needs an IR-rewrite pass this build has no
-            # equivalent of. It is linker-global, which is fine here: nmap emits
-            # no multicall module (no `multicall` block), so nothing folds this
-            # binary together with another.
-            UNPIN_VFS_DEFS="-DUNPIN_VFS_DIRS -DUNPIN_VFS_SELF -DUNPIN_VFS_ROOT=\"${vfsRoot}/\"${lib.optionalString isDarwin " -DUNPIN_VFS_DLSYM"}${lib.optionalString (!isDarwin && pkgs.stdenv.hostPlatform.is32bit) " -DUNPIN_WRAP_TIME64"}"
+            UNPIN_VFS_DEFS="-DUNPIN_VFS_DIRS -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -DUNPIN_VFS_ROOT=\"${vfsRoot}/\""
             MINIZ_DEFS="-DMINIZ_USE_ZSTD -DMINIZ_NO_TIME -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES"
             $CC -O2 -c vfs.c        $UNPIN_VFS_DEFS $MINIZ_DEFS -o vfs.o
             $CC -O2 -c miniz.c      -D_GNU_SOURCE -w $MINIZ_DEFS -o miniz.o
             $CC -O2 -c unpin_zstd.c -D_GNU_SOURCE -w $MINIZ_DEFS -DUNPIN_ZSTD_VENDORED -o unpin_zstd.o
           '' + lib.optionalString (!isDarwin) ''
-            echo "==> Linux: route nmap's libc file calls through the VFS shims"
-            # Via NIX_LDFLAGS, not the makefile: nmap stuffs its own -L paths
-            # into LDFLAGS and the cc-wrapper appends these to the final link
-            # regardless. `--wrap` resolves at final link, so it reaches the
-            # members of liblua.a/libnbase.a too -- which matters, since
-            # luaL_loadfile (all of NSE) lives in liblua.
-            export NIX_LDFLAGS="$NIX_LDFLAGS --wrap=open --wrap=stat --wrap=lstat --wrap=access --wrap=opendir --wrap=readdir --wrap=closedir --wrap=fopen"
-          '' + lib.optionalString (!isDarwin && pkgs.stdenv.hostPlatform.is32bit) ''
-            echo "==> 32-bit musl is _REDIR_TIME64: wrap the __stat_time64 aliases too"
-            # Pairs with -DUNPIN_WRAP_TIME64 above, which compiles the shims.
-            export NIX_LDFLAGS="$NIX_LDFLAGS --wrap=__stat_time64 --wrap=__lstat_time64"
+            echo "==> stage a rewritable copy of the EXTERNAL liblua"
+            cp ${pkgs.pkgsStatic.lua5_4}/lib/liblua.a liblua_vfs.a
+            chmod +w liblua_vfs.a
           '';
 
-          # macOS needs no extra link step: under -DUNPIN_VFS_DLSYM vfs.c
-          # DEFINES open/stat/..., and a definition in a linked object shadows
-          # the libSystem import for every reference.
+          # ONE binding, both platforms. -DUNPIN_VFS_NOWRAP names the
+          # interceptors unpinvfs_*, and nix-lib's shared IR rename points
+          # nmap's own libc file-op references at them. This replaces the old
+          # --wrap (Linux) + -DUNPIN_VFS_DLSYM (darwin) split: both of those
+          # bind the WHOLE link and so are not mega-safe, and the dlsym half
+          # existed only because there was no IR pass within reach.
+          #
+          # Coverage differs in kind, and getting it wrong is not subtle:
+          # --wrap resolved at the FINAL link and so reached every archive, the
+          # store's included; the rename reaches exactly what is rewritten
+          # below. nmap loads every .nse/.lua through luaL_loadfile, which lives
+          # in liblua -- and on Linux liblua is the EXTERNAL lua-static, not the
+          # bundled one darwin uses (--with-liblua=included). Leaving it out
+          # builds clean and then dies at runtime with "could not load
+          # nse_main.lua", so preBuild stages a writable copy ahead of -llua on
+          # the link line and the archive loop below rewrites it.
+          postBuild = (old.postBuild or "") + ''
+            ${ulib.vfsBindFns {
+                syms = [ "open" "fopen" "stat" "lstat" "access"
+                         "opendir" "readdir" "closedir" ];
+              }}
+            ${ulib.vfsBindArchiveFns}
+            MT=${ulib.unpinToolchain pkgs.stdenv.buildPlatform.system}/bin/llvm
+            echo "==> bind the VFS: rename nmap's libc file-op refs in the IR"
+            # NOT the VFS objects themselves -- vfs.c calls the genuine libc, so
+            # renaming its references would make each shim call itself.
+            for o in $(find . -name '*.o'); do
+              case "$(basename "$o")" in vfs.o|miniz.o|unpin_zstd.o) continue ;; esac
+              isbc "$o" && bcrewrite "$o"
+            done
+            for a in $(find . -name '*.a'); do
+              [ -n "$($MT ar t "$a" 2>/dev/null | head -1)" ] || continue
+              bcrewriteArchive "$a"
+            done
+            echo "==> relink nmap against the rewritten objects"
+            rm -f nmap
+            make $makeFlags -j''${NIX_BUILD_CORES:-1} nmap
+          '';
         });
     in
     unpins-lib.lib.mkStandaloneFlake {
