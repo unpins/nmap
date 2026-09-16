@@ -65,6 +65,15 @@ The [Releases](https://github.com/unpins/nmap/releases) page has standalone bina
   scripts and `nselib`) are carried inside the binary and read from there. Your
   own copies still win: `--datadir`, `$NMAPDIR` and `~/.nmap` are searched
   first, in exactly the order upstream nmap documents.
+- The scripting engine's own unit tests run on every build that can execute what
+  it just produced, and CI additionally reads a script out of the embedded tree
+  on every platform — a binary that links but cannot reach its data files fails
+  the build instead of shipping.
+- `-oX` reports carry no `xml-stylesheet` line. The only copy of `nmap.xsl` is
+  the one inside the binary, at a path that exists nowhere on disk, so naming it
+  would send every reader of the report to a file it cannot open. For a styled
+  report in a browser, pass `--webxml` (references nmap.org's copy) or
+  `--stylesheet <path>` (your own).
 - **Windows** is not shipped: nmap's packet capture requires the
   [Npcap](https://npcap.com/) kernel driver, loaded at runtime from a separate
   signed driver install, which can't live inside a self-contained binary (the

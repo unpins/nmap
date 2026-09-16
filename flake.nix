@@ -59,6 +59,16 @@
       # $NMAPDIR, ~/.nmap, the exe dir, <exe>/../share/nmap, and only then the
       # embedded copy as the last resort. A user's own data files still win,
       # exactly as upstream documents.
+      #
+      # One thing in the tree must NOT come from the mount. `-oX` writes an
+      # `<?xml-stylesheet href=…?>` naming the nmap.xsl that nmap_fetchfile
+      # found, and whoever opens the report later is a browser, not nmap: a
+      # href into the mount points at a path that exists nowhere on disk, so
+      # the report renders as raw XML and the reference is simply a lie.
+      # Upstream's own contract covers this — XSLStyleSheet() returning NULL
+      # means "skip the element" — so return NULL when the copy found is the
+      # embedded one. `--stylesheet` and `--webxml` still work, and a real
+      # nmap.xsl reached through --datadir/$NMAPDIR/~/.nmap is still named.
       injectVfs = pkgs: drv: drv.overrideAttrs (old:
         let
           lib = pkgs.lib;
@@ -72,6 +82,11 @@
             echo "==> point the compiled-in NMAPDATADIR at the VFS mount"
             substituteInPlace Makefile.in \
               --replace-fail '-DNMAPDATADIR=\"$(nmapdatadir)\"' '-DNMAPDATADIR=\"${vfsRoot}\"'
+
+            echo "==> drop the xml-stylesheet when its only copy is embedded"
+            substituteInPlace NmapOps.cc \
+              --replace-fail 'xsl_stylesheet = filename_to_url(tmpxsl);' \
+                'if (strncmp(tmpxsl, NMAPDATADIR "/", strlen(NMAPDATADIR "/")) == 0) return NULL; xsl_stylesheet = filename_to_url(tmpxsl);'
 
             echo "==> put the VFS objects on nmap's link line"
             substituteInPlace Makefile.in \
@@ -276,6 +291,28 @@
           makeFlags = (oa.makeFlags or [ ])
             ++ [ "CC=${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc" ];
           postFixup = "";
+          # The NSE engine has unit tests of its own and they run offline
+          # (`--script=unittest`, upstream's own `check-nse`). What they do NOT
+          # do is fail: the script hands its result back as text and nmap exits
+          # 0 either way, so `make check-nse` is green even when every test
+          # fails — hence the explicit match on the output. The other halves of
+          # upstream's `make check` are left out: `check-nsock` and `check-nmap`
+          # link test programs of their own, and those link lines carry none of
+          # the VFS objects, so the shared IR rename leaves them with an
+          # undefined `unpinvfs_open`. The smoke gate covers the complementary
+          # half — it reads a script out of the embedded tree.
+          doCheck = pkgs.pkgsStatic.stdenv.buildPlatform.canExecute
+            pkgs.pkgsStatic.stdenv.hostPlatform;
+          checkPhase = ''
+            runHook preCheck
+            __nse=$(./nmap --datadir . --script=unittest --script-args=unittest.run 2>&1)
+            printf '%s\n' "$__nse"
+            case "$__nse" in
+              *"All tests passed"*) ;;
+              *) echo "NSE unit tests did not report success" >&2; exit 1 ;;
+            esac
+            runHook postCheck
+          '';
         }
         # The bundled liblua's Makefile bakes the archive operation into its
         # `AR` variable (`AR= ar rcu`) and writes the rule as `$(AR) $@ …`. On
