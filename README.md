@@ -55,8 +55,7 @@ The [Releases](https://github.com/unpins/nmap/releases) page has standalone bina
   only builds a shared object (no static-archive path), so it is archived into
   a `liblinear.a`. The `--gc-sections` optimization is turned off because it
   overrides the Makefile `LDFLAGS` that carry nmap's in-tree `-L` search paths.
-  And on macOS, where `pkgsStatic.lua` installs only a `liblua.dylib` (no
-  static archive), nmap is pointed at its own bundled liblua so the scripting
+  And on macOS, nmap is pointed at its own bundled liblua so the scripting
   engine links statically. macOS also folds the C++ runtime (`libc++`) in as a
   static archive, since nmap is a C++ program and the dynamic system `libc++`
   isn't on the portable-binary allow-list. Both keep the binary free of
