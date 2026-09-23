@@ -334,19 +334,21 @@
           # nmap is C++; on darwin the link otherwise imports the dynamic
           # /usr/lib/libc++.1.dylib, which action-build's darwin allow-list
           # rejects (only libSystem + libobjc + declared frameworks are allowed;
-          # libc++ *can* be linked statically, so it must be). Same shim
-          # chafa/fpcalc/ffmpeg use: expose the static libc++.a as
-          # libc++.a/libstdc++.a/libc++abi.a on a -L dir ahead of the system
-          # dylib dirs and pass -search_paths_first so ld64 takes the archive
-          # instead of its default -search_dylibs_first (which finds the dylib).
+          # libc++ *can* be linked statically, so it must be).
+          #
+          # There used to be a shim here exposing nixpkgs' static libc++.a as
+          # libc++.a/libstdc++.a/libc++abi.a on a -L dir. Under the engine that
+          # is the wrong archive: `libcxx` is excluded from the engine's stdenv
+          # swap — measured, the engine scope's libcxx is not engine-built
+          # either, and it cannot be, since the engine's clang needs a libc++
+          # before it can build one — so clang++ compiled against the libc++
+          # headers in its own sysroot and then linked a differently-built
+          # archive over them. It links its own, statically; the allow-list gate
+          # fails the build if that ever stops being true.
+          # -search_paths_first stays: it governs how ld64 resolves -l for the
+          # other libraries too.
           preConfigure = (oa.preConfigure or "") + ''
-            mkdir -p "$TMPDIR/cxx-static"
-            ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
-            ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
-            ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
-            export NIX_LDFLAGS="-L$TMPDIR/cxx-static $NIX_LDFLAGS"
             export LDFLAGS="-Wl,-search_paths_first ''${LDFLAGS:-}"
-            export LIBS="-lc++abi ''${LIBS:-}"
           '';
         }));
     };
