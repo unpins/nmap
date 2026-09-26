@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [7.99-2] - 2026-09-26
+
 ### Changed
 
 - nmap's data files — the service and OS-fingerprint databases, `nse_main.lua`,
