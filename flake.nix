@@ -193,12 +193,9 @@
       # entry dropped, the artifact still carries zero references.
       removeReferences = [ "lua-static" ];
       optimize = { gc = false; };
-      # The data tree rides the binary (see `injectVfs`). It used to ship as
-      # the companion `nmap-<ver>-data.tar.zst` via `package_data`, which is
-      # gone: that option publishes `result/share`, and `unpinEmbedWrap` keeps
-      # only `share/man` there, so since the move to the engine the tarball was
-      # empty of everything that matters and the released binary would have had
-      # no NSE at all.
+      # The data tree rides the binary (see `injectVfs`). Up to v7.99-1 it was a
+      # separate release asset instead, which is why that one version installs
+      # as a port scanner with no NSE.
       runtimeEmbed = {
         native = pkgs: base: {
           man = true;
