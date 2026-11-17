@@ -1,0 +1,27 @@
+Put the unpin-vfs objects on the Ncat and Nping link lines too. The IR
+rename in flake.nix rewrites the shared archives (nbase, libdnet, nsock,
+libpcap) and the objects of all three programs, so every program that
+links them needs the unpinvfs_* definitions.
+
+--- a/ncat/Makefile.in
++++ b/ncat/Makefile.in
+@@ -117,7 +117,7 @@
+ 
+ 
+ $(TARGET): @LUA_DEPENDS@ $(OBJS) $(NSOCKLIB)
+-	$(CC) -o $@ $(CFLAGS) $(lua_cflags) $(LDFLAGS) $(OBJS) $(NSOCKLIB) $(NBASELIB) $(OPENSSL_LIBS) $(PCAP_LIBS) $(LUA_LIBS) $(LIBS)
++	$(CC) -o $@ $(CFLAGS) $(lua_cflags) $(LDFLAGS) $(OBJS) ../vfs.o ../miniz.o ../unpin_zstd.o $(NSOCKLIB) $(NBASELIB) $(OPENSSL_LIBS) $(PCAP_LIBS) $(LUA_LIBS) $(LIBS)
+ 
+ %.o: %.c
+ 	$(CC) $(CPPFLAGS) $(LUA_CFLAGS) $(CFLAGS) -c $< -o $@
+--- a/nping/Makefile.in
++++ b/nping/Makefile.in
+@@ -86,7 +86,7 @@
+ $(TARGET): $(NBASEDIR)/libnbase.a $(NSOCKDIR)/src/libnsock.a ../libnetutil/libnetutil.a $(OBJS)
+ 	@echo Compiling nping
+ 	rm -f $@
+-	$(CXX) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
++	$(CXX) $(LDFLAGS) -o $@ $(OBJS) ../vfs.o ../miniz.o ../unpin_zstd.o $(LIBS)
+ 	@echo Nping compiled successfully!
+ 
+ 

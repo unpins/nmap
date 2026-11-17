@@ -27,6 +27,26 @@
       # VFS root itself is this plus the trailing slash.
       vfsRoot = "/__unpins_nmapdata__";
 
+      # nmap's installed data tree, staged straight from the source tarball by
+      # upstream's own install-nmap/install-nse file lists. It cannot come from
+      # the build's $out: a self-fold ships the mega link, and the multicall
+      # options only see a package set. The build diffs its own share/nmap
+      # against this, so a file upstream adds to the install fails the build
+      # instead of going missing from the binary.
+      dataTree = pkgs: pkgs.buildPackages.runCommand "nmap-data" {
+        inherit (pkgs.pkgsStatic.nmap) src;
+      } ''
+        tar xf "$src"
+        cd nmap-*
+        mkdir -p "$out/scripts" "$out/nselib"
+        install -m644 docs/nmap.xsl docs/nmap.dtd nmap-services nmap-rpc \
+          nmap-os-db nmap-service-probes nmap-protocols nmap-mac-prefixes \
+          nse_main.lua "$out/"
+        install -m644 scripts/script.db scripts/*.nse "$out/scripts/"
+        install -m644 nselib/*.lua nselib/*.luadoc "$out/nselib/"
+        find nselib/data -type f -exec install -Dm644 {} "$out/{}" \;
+      '';
+
       # Carry nmap's data tree (nse_main.lua, the NSE scripts and nselib,
       # nmap-services, nmap-os-db, nmap-service-probes, nmap-mac-prefixes)
       # INSIDE the binary, served by the shared unpin-vfs core from the ZIP the
@@ -62,6 +82,7 @@
           patches = (old.patches or [ ]) ++ [
             ./vfs-datadir-and-link.patch
             ./xsl-skip-embedded-stylesheet.patch
+            ./vfs-link-ncat-nping.patch
           ] ++ lib.optional (!isDarwin) ./vfs-link-external-liblua.patch;
 
           postPatch = (old.postPatch or "") + ''
@@ -126,9 +147,11 @@
               [ -n "$($MT ar t "$a" 2>/dev/null | head -1)" ] || continue
               bcrewriteArchive "$a"
             done
-            echo "==> relink nmap against the rewritten objects"
-            rm -f nmap
+            echo "==> relink the three programs against the rewritten objects"
+            rm -f nmap ncat/ncat nping/nping
             make $makeFlags -j''${NIX_BUILD_CORES:-1} nmap
+            make $makeFlags -C ncat ncat
+            make $makeFlags -C nping nping
           '';
         });
     in
@@ -146,40 +169,33 @@
       smoke = [ "--script-help=http-git" ];
       smokePattern = "^Categories: ";
       # Build via the unpin-llvm engine so nmap links the same engine-built
-      # openssl/zlib/… closure the rest of the catalog does. No `multicall`
-      # block: nmap ships one binary and nothing needs its bitcode module, so
-      # nix-lib's `wantModule` (`multicall != null && …`) stays false and no
-      # fold pass runs at all.
+      # openssl/zlib/… closure the rest of the catalog does.
       engine = "unpin-llvm";
-
-      # One dead store-path string survives in the static binary and must be
-      # scrubbed to keep the 0-external-ref invariant: liblua's compiled-in
-      # LUA_PATH_DEFAULT/LUA_CPATH_DEFAULT (`…/lua/5.4/?.lua`, `?.so`). nmap
-      # runs its own bundled nselib and a static binary can never dlopen a Lua
-      # C module, so these are unused. Name-substring pattern, arch-agnostic.
-      #
-      # `nmap-static` used to be in this list too, for the compiled-in
-      # NMAPDATADIR (`…/share/nmap`) pointing at the base build — a baked
-      # self-path that unpinEmbedWrap turns into an external cross-ref when it
-      # copies the binary to a fresh store path. NMAPDATADIR is the VFS mount
-      # now, so that string is not in the binary at all; measured with the
-      # entry dropped, the artifact still carries zero references.
-      removeReferences = [ "lua-static" ];
-      # The data tree rides the binary (see `injectVfs`). Up to v7.99-1 it was a
-      # separate release asset instead, which is why that one version installs
-      # as a port scanner with no NSE.
-      runtimeEmbed = {
-        native = pkgs: base: {
-          man = true;
-          # Stage the CONTENTS of share/nmap at the ZIP root: that root is what
-          # NMAPDATADIR names, and nmap asks for tree-relative paths
-          # ("nse_main.lua", "scripts/http-git.nse", "nselib/http.lua").
-          runtimeStage = ''
-            cp -a ${base}/share/nmap/. "$__unpin_stage/"
-            chmod -R u+w "$__unpin_stage"
-          '';
-        };
+      # nmap's tree also builds Ncat and Nping; the engine folds the three into
+      # the one binary. Bare `nmap` stays nmap.
+      multicall = {
+        programs = [ { name = "nmap"; } { name = "ncat"; } { name = "nping"; } ];
+        # nmap and nping are C++; the mega link needs the C++ runtime.
+        requires.cxx = true;
+        # Off darwin ncat links the external lua-static, which the fold's
+        # auto-derived dependencies miss (nmap passes it by --with-liblua, not
+        # buildInputs). Darwin builds the bundled liblua into the tree.
+        depArchives = pkgs: pkgs.lib.optional (!pkgs.stdenv.hostPlatform.isDarwin)
+          "${pkgs.pkgsStatic.lua5_4}/lib/liblua.a";
+        # The data tree rides the binary (see `injectVfs`). Up to v7.99-1 it
+        # was a separate release asset instead, which is why that one version
+        # installs as a port scanner with no NSE.
+        runtimeDataRoot = dataTree;
+        # Dead store-path strings that survive in the static binary, scrubbed
+        # to keep the 0-external-ref invariant: liblua's compiled-in
+        # LUA_PATH_DEFAULT/LUA_CPATH_DEFAULT (nmap runs its own bundled nselib,
+        # and a static binary can never dlopen a Lua C module) and ncat's
+        # NCAT_DATADIR, the directory of the CA bundle it ships. ncat treats
+        # that bundle as optional and verifies against the system CAs it
+        # finds through openssl's defaults either way.
+        removeReferences = [ "lua-static" "nmap-static" ];
       };
+
       build = pkgs:
         let
           liblinearStatic = pkgs.pkgsStatic.liblinear.overrideAttrs (_: {
@@ -203,10 +219,6 @@
         in
         injectVfs pkgs
         ((pkgs.pkgsStatic.nmap.override { liblinear = liblinearStatic; }).overrideAttrs (oa: {
-          # This package ships the nmap scanner. nmap's tree also builds Ncat
-          # and Nping, but the single-binary release publishes only `bin/nmap`,
-          # so skip them — leaner build, smaller cross/Windows surface.
-          #
           # On darwin only, force nmap's *bundled* liblua (statically linked).
           # nixpkgs' `pkgsStatic.lua` on darwin installs just a shared
           # `liblua.5.4.7.dylib` with no static archive, so the default
@@ -216,8 +228,7 @@
           # `liblua.a` and links statically, leaving only /usr/lib system libs.
           # Linux and the musl crosses keep the external lua-static (it ships a
           # real `liblua.a`), so the darwin-only flag never reaches them.
-          configureFlags = oa.configureFlags ++ [ "--without-ncat" "--without-nping" ]
-            ++ pkgs.lib.optionals isDarwin [
+          configureFlags = oa.configureFlags ++ pkgs.lib.optionals isDarwin [
               "--with-liblua=included"
               # Force the bundled sub-libs (libdnet-stripped, libpcap, libssh2,
               # libz — all pulled in via AC_CONFIG_SUBDIRS, so this arg is
@@ -245,6 +256,11 @@
           makeFlags = (oa.makeFlags or [ ])
             ++ [ "CC=${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc" ];
           postFixup = "";
+          # The tree the binary carries is `dataTree`, not this install.
+          postInstall = (oa.postInstall or "") + ''
+            diff -r "$out/share/nmap" ${dataTree pkgs} \
+              || { echo "share/nmap differs from dataTree: update its file lists" >&2; exit 1; }
+          '';
           # The NSE engine has unit tests of its own and they run offline
           # (`--script=unittest`, upstream's own `check-nse`). What they do NOT
           # do is fail: the script hands its result back as text and nmap exits

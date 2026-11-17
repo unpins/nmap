@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Ncat and Nping, the netcat and the packet generator that come with nmap.
+  They are in the same binary: `unpin install nmap` puts `ncat` and `nping` on
+  your PATH next to `nmap`, and the man pages of both are embedded.
+
 ## [7.99-2] - 2026-09-26
 
 ### Changed
