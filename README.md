@@ -16,11 +16,21 @@ Run `nmap` with [unpin](https://github.com/unpins/unpin):
 unpin nmap -sV scanme.nmap.org
 ```
 
-To install it onto your PATH:
+The binary also holds Ncat and Nping, nmap's netcat and packet generator:
+
+```bash
+unpin nmap --unpin-program=ncat -l 8080
+unpin nmap --unpin-program=nping --tcp -p 80 scanme.nmap.org
+```
+
+To install them onto your PATH:
 
 ```bash
 unpin install nmap
 ```
+
+`unpin install nmap` creates `nmap`, `ncat` and `nping`; once they are on your
+PATH you can call them by name — `ncat -l 8080`.
 
 nmap's data files — the service and OS-fingerprint databases and the full NSE
 script library — are inside the binary, so `-sC`/`-sV`/`-O` and the scripting
@@ -28,7 +38,8 @@ engine work out of the box with nothing else to download.
 
 ## Man pages
 
-`nmap.1` is embedded in the binary — read it with `unpin man nmap`.
+`nmap.1`, `ncat.1` and `nping.1` are embedded in the binary — read them with
+`unpin man nmap`, `unpin man nmap ncat` and `unpin man nmap nping`.
 
 ## Build locally
 
@@ -53,9 +64,7 @@ The [Releases](https://github.com/unpins/nmap/releases) page has standalone bina
 
 - A few dependency tweaks make the static build link. nixpkgs' `liblinear`
   only builds a shared object (no static-archive path), so it is archived into
-  a `liblinear.a`. The `--gc-sections` optimization is turned off because it
-  overrides the Makefile `LDFLAGS` that carry nmap's in-tree `-L` search paths.
-  And on macOS, nmap is pointed at its own bundled liblua so the scripting
+  a `liblinear.a`. And on macOS, nmap is pointed at its own bundled liblua so the scripting
   engine links statically. macOS also folds the C++ runtime (`libc++`) in as a
   static archive, since nmap is a C++ program and the dynamic system `libc++`
   isn't on the portable-binary allow-list. Both keep the binary free of
@@ -73,6 +82,8 @@ The [Releases](https://github.com/unpins/nmap/releases) page has standalone bina
   would send every reader of the report to a file it cannot open. For a styled
   report in a browser, pass `--webxml` (references nmap.org's copy) or
   `--stylesheet <path>` (your own).
+- **Not included:** `ndiff` and Zenmap, which are Python programs (nixpkgs
+  leaves them out too).
 - **Windows** is not shipped: nmap's packet capture requires the
   [Npcap](https://npcap.com/) kernel driver, loaded at runtime from a separate
   signed driver install, which can't live inside a self-contained binary (the
