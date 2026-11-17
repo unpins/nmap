@@ -44,46 +44,29 @@
       # itself fopen. The single std::ifstream in the tree (nmap_dns.cc) reads
       # /etc/hosts -- a real system file, outside the mount.
       #
-      # Reaching the mount is one build variable: NMAPDATADIR is
-      # `-DNMAPDATADIR=\"$(nmapdatadir)\"` in Makefile.in. Pointing it at the
-      # mount leaves nmap's documented search order untouched -- --datadir,
+      # Reaching the mount is one build variable: NMAPDATADIR, set in
+      # Makefile.in by vfs-datadir-and-link.patch (which hardcodes `vfsRoot`).
+      # Pointing it at the mount leaves nmap's documented search order untouched -- --datadir,
       # $NMAPDIR, ~/.nmap, the exe dir, <exe>/../share/nmap, and only then the
       # embedded copy as the last resort. A user's own data files still win,
       # exactly as upstream documents.
       #
-      # One thing in the tree must NOT come from the mount. `-oX` writes an
-      # `<?xml-stylesheet href=…?>` naming the nmap.xsl that nmap_fetchfile
-      # found, and whoever opens the report later is a browser, not nmap: a
-      # href into the mount points at a path that exists nowhere on disk, so
-      # the report renders as raw XML and the reference is simply a lie.
-      # Upstream's own contract covers this — XSLStyleSheet() returning NULL
-      # means "skip the element" — so return NULL when the copy found is the
-      # embedded one. `--stylesheet` and `--webxml` still work, and a real
-      # nmap.xsl reached through --datadir/$NMAPDIR/~/.nmap is still named.
+      # One thing in the tree must NOT come from the mount: the nmap.xsl an
+      # `-oX` report names (xsl-skip-embedded-stylesheet.patch).
       injectVfs = pkgs: drv: drv.overrideAttrs (old:
         let
           lib = pkgs.lib;
           isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
         in
         {
+          patches = (old.patches or [ ]) ++ [
+            ./vfs-datadir-and-link.patch
+            ./xsl-skip-embedded-stylesheet.patch
+          ] ++ lib.optional (!isDarwin) ./vfs-link-external-liblua.patch;
+
           postPatch = (old.postPatch or "") + ''
             echo "==> inject unpin-vfs core (vfs.c + miniz.c)"
             cp ${ulib.vfsCore}/*.c ${ulib.vfsCore}/*.h .
-
-            echo "==> point the compiled-in NMAPDATADIR at the VFS mount"
-            substituteInPlace Makefile.in \
-              --replace-fail '-DNMAPDATADIR=\"$(nmapdatadir)\"' '-DNMAPDATADIR=\"${vfsRoot}\"'
-
-            echo "==> drop the xml-stylesheet when its only copy is embedded"
-            substituteInPlace NmapOps.cc \
-              --replace-fail 'xsl_stylesheet = filename_to_url(tmpxsl);' \
-                'if (strncmp(tmpxsl, NMAPDATADIR "/", strlen(NMAPDATADIR "/")) == 0) return NULL; xsl_stylesheet = filename_to_url(tmpxsl);'
-
-            echo "==> put the VFS objects on nmap's link line"
-            substituteInPlace Makefile.in \
-              --replace-fail '-o $@ $(OBJS) main.o $(LIBS)' \
-                '-o $@ $(OBJS) main.o vfs.o miniz.o unpin_zstd.o ${
-                   lib.optionalString (!isDarwin) "liblua_vfs.a "}$(LIBS)'
           '';
 
           # Compiled after configure, not before: the VFS objects must exist by
@@ -217,19 +200,6 @@
             '';
           });
           isDarwin = pkgs.pkgsStatic.stdenv.hostPlatform.isDarwin;
-          # libdnet-stripped's bundled (pre-generated) configure probes for
-          # Linux PF_PACKET with a nested function inside main()
-          # (`int foo() { return ETH_P_ALL; }`) — a GNU C extension gcc accepts
-          # but clang rejects ("function definition is not allowed here"). Under
-          # the engine (clang) the probe fails to compile → "no" → configure
-          # aborts with "Ethernet support not found for this system". Rewrite it
-          # to the valid form the sibling arp probe already uses
-          # (`int foo = SIOCGARP;`) so the macro is referenced, not called.
-          # No-op on darwin (Linux-only probe; headers absent there anyway).
-          fixLibdnetPfPacket = ''
-            substituteInPlace libdnet-stripped/configure \
-              --replace 'int foo() { return ETH_P_ALL; }' 'int foo = ETH_P_ALL;'
-          '';
         in
         injectVfs pkgs
         ((pkgs.pkgsStatic.nmap.override { liblinear = liblinearStatic; }).overrideAttrs (oa: {
@@ -264,10 +234,8 @@
               # -soname), so this stays darwin-only.
               "--enable-shared=no"
             ];
-          # libdnet-stripped PF_PACKET probe fix (see `fixLibdnetPfPacket`).
-          # Applied unconditionally — the whole package rebuilds under the
-          # engine, so there is no cached Linux drv hash to preserve.
-          postPatch = (oa.postPatch or "") + fixLibdnetPfPacket;
+          patches = (oa.patches or [ ]) ++ [ ./libdnet-pf-packet-probe.patch ]
+            ++ pkgs.lib.optional isDarwin ./liblua-ar-operation.patch;
           # nixpkgs' nmap hardcodes `CC=<prefix>gcc` in makeFlags whenever
           # build≠host (always true under pkgsStatic). The unpin-llvm engine is
           # clang-only on *every* target — there is no `<prefix>gcc` — so every
@@ -300,23 +268,7 @@
             runHook postCheck
           '';
         }
-        # The bundled liblua's Makefile bakes the archive operation into its
-        # `AR` variable (`AR= ar rcu`) and writes the rule as `$(AR) $@ …`. On
-        # the aarch64-darwin *cross*, nmap's own makeFlags override `AR=<prefix>-ar`
-        # (binary only, no operation), so the rule expands to `<prefix>-ar
-        # liblua.a …` — no operation letter — and `ar` just dumps its usage and
-        # fails. (x86_64-darwin is build==host, leaves AR alone, and builds
-        # fine.) Move the operation into the rule so it works both ways.
-        # Darwin-only: the Linux/cross builds use the external lua-static and
-        # never touch the bundled liblua Makefile.
         // pkgs.lib.optionalAttrs isDarwin {
-          # optionalAttrs' postPatch REPLACES (shadows) the base one, so repeat
-          # the shared libdnet fix here before the darwin-only liblua AR fix.
-          postPatch = (oa.postPatch or "") + fixLibdnetPfPacket + ''
-            substituteInPlace liblua/Makefile \
-              --replace 'AR= ar rcu' 'AR= ar' \
-              --replace '$(AR) $@' '$(AR) rcu $@'
-          '';
           # nmap is C++; on darwin the link otherwise imports the dynamic
           # /usr/lib/libc++.1.dylib, which action-build's darwin allow-list
           # rejects (only libSystem + libobjc + declared frameworks are allowed;

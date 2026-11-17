@@ -1,0 +1,27 @@
+The bundled liblua's Makefile bakes the archive operation into AR (`AR= ar
+rcu`) and writes the rule as `$(AR) $@ ...`. On the aarch64-darwin cross,
+nmap's makeFlags override AR with the bare `<prefix>-ar`, so the rule loses its
+operation letter and ar fails with its usage text. Move the operation into the
+rule so both spellings of AR work. Darwin only: Linux links the external
+lua-static and never builds this Makefile.
+
+--- a/liblua/Makefile
++++ b/liblua/Makefile
+@@ -11,7 +11,7 @@
+ LDFLAGS= $(SYSLDFLAGS) $(MYLDFLAGS)
+ LIBS= -lm $(SYSLIBS) $(MYLIBS)
+ 
+-AR= ar rcu
++AR= ar
+ RANLIB= ranlib
+ RM= rm -f
+ UNAME= uname
+@@ -57,7 +57,7 @@
+ a:	$(ALL_A)
+ 
+ $(LUA_A): $(BASE_O)
+-	$(AR) $@ $(BASE_O)
++	$(AR) rcu $@ $(BASE_O)
+ 	$(RANLIB) $@
+ 
+ $(LUA_T): $(LUA_O) $(LUA_A)

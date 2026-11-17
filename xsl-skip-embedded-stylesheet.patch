@@ -1,0 +1,18 @@
+With -oX, nmap names the nmap.xsl that nmap_fetchfile found in an
+<?xml-stylesheet?> element, and the report is later opened by a browser, not
+nmap. When the copy found is the embedded one, the href points into the VFS
+mount, a path that exists nowhere on disk. Upstream's own contract covers this:
+XSLStyleSheet() returning NULL means "skip the element". --stylesheet, --webxml
+and a real nmap.xsl reached through --datadir, $NMAPDIR or ~/.nmap still work.
+
+--- a/NmapOps.cc
++++ b/NmapOps.cc
+@@ -610,7 +610,7 @@
+     return xsl_stylesheet;
+ 
+   if (nmap_fetchfile(tmpxsl, sizeof(tmpxsl), "nmap.xsl") == 1) {
+-    xsl_stylesheet = filename_to_url(tmpxsl);
++    if (strncmp(tmpxsl, NMAPDATADIR "/", strlen(NMAPDATADIR "/")) == 0) return NULL; xsl_stylesheet = filename_to_url(tmpxsl);
+   } else {
+     /* Use a relative URL if nmap_fetchfile failed. It won't work,
+        but it gives a clue that there is an nmap.xsl somewhere. */

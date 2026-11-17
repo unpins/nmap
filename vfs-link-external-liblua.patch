@@ -1,0 +1,16 @@
+Linux and the musl crosses link the external lua-static, whose objects the
+flake renames onto the VFS (luaL_loadfile lives there). preBuild stages that
+rewritable copy as liblua_vfs.a; put it ahead of -llua. Applies on top of
+vfs-datadir-and-link.patch; darwin uses the bundled liblua and skips this.
+
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -129,7 +129,7 @@
+ 	$(OBJS) main.o
+ 	@echo Compiling nmap
+ 	rm -f $@
+-	$(CXX) $(LDFLAGS) -o $@ $(OBJS) main.o vfs.o miniz.o unpin_zstd.o $(LIBS)
++	$(CXX) $(LDFLAGS) -o $@ $(OBJS) main.o vfs.o miniz.o unpin_zstd.o liblua_vfs.a $(LIBS)
+ 
+ build-pcre: $(LIBPCREDIR)/Makefile
+ 	@echo Compiling libpcre; cd $(LIBPCREDIR) && $(MAKE)

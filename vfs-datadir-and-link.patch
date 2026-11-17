@@ -1,0 +1,24 @@
+Point the compiled-in NMAPDATADIR at the mount of the embedded data tree
+(`vfsRoot` in flake.nix; keep the two in step), and put the unpin-vfs objects
+the flake compiles in preBuild on nmap's link line.
+
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -34,7 +34,7 @@
+ NDIFFDIR = @NDIFFDIR@
+ NPINGDIR = @NPINGDIR@
+ PYTHON = @PYTHON@
+-DEFS = @DEFS@ -DNMAP_PLATFORM=\"$(NMAP_PLATFORM)\" -DNMAPDATADIR=\"$(nmapdatadir)\"
++DEFS = @DEFS@ -DNMAP_PLATFORM=\"$(NMAP_PLATFORM)\" -DNMAPDATADIR=\"/__unpins_nmapdata__\"
+ # With GCC, add extra security checks to source code.
+ # http://gcc.gnu.org/ml/gcc-patches/2004-09/msg02055.html
+ # Level 1 only makes changes that don't affect "conforming" programs,
+@@ -129,7 +129,7 @@
+ 	$(OBJS) main.o
+ 	@echo Compiling nmap
+ 	rm -f $@
+-	$(CXX) $(LDFLAGS) -o $@ $(OBJS) main.o $(LIBS)
++	$(CXX) $(LDFLAGS) -o $@ $(OBJS) main.o vfs.o miniz.o unpin_zstd.o $(LIBS)
+ 
+ build-pcre: $(LIBPCREDIR)/Makefile
+ 	@echo Compiling libpcre; cd $(LIBPCREDIR) && $(MAKE)

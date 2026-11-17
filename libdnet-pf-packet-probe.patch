@@ -1,0 +1,19 @@
+libdnet-stripped's pre-generated configure probes for Linux PF_PACKET with a
+nested function inside main() (`int foo() { return ETH_P_ALL; }`), a GNU C
+extension clang rejects ("function definition is not allowed here"). Under the
+engine the probe fails to compile, answers "no", and configure aborts with
+"Ethernet support not found for this system". Use the form the sibling arp
+probe already uses, so the macro is referenced instead of called. Inert on
+darwin (Linux-only probe).
+
+--- a/libdnet-stripped/configure
++++ b/libdnet-stripped/configure
+@@ -15219,7 +15219,7 @@
+ int
+ main (void)
+ {
+-int foo() { return ETH_P_ALL; }
++int foo = ETH_P_ALL;
+   ;
+   return 0;
+ }
