@@ -9,24 +9,15 @@
   inputs.unpins-lib.url = "github:unpins/nix-lib";
 
   # Native Linux/macOS comes from pkgsStatic.nmap with one dependency fix.
-  # nixpkgs' liblinear only builds and installs a shared `liblinear.so.5` — its
-  # Makefile has no static-install path — so a static link of `-llinear` finds
-  # no `.a` and the whole build fails before nmap is even reached. liblinear's
-  # Makefile *does* have a `liblinear.a` target, so swap the broken shared build
-  # for the static archive and install that. nmap's configure then links it
-  # statically (falling back to its own bundled, identical copy if its link
-  # probe is unhappy). liblinear feeds nmap alone, so the fix lives here, inline,
-  # rather than in nix-lib. postFixup is cleared because its only content is a
-  # darwin `install_name_tool` call rewriting the now-absent liblinear dylib.
-  #
-  # `optimize.gc = false` turns off the Linux-native --gc-sections overlay for
-  # this package. That overlay injects `LDFLAGS=…` on the make command line,
-  # which *overrides* (not appends to) the Makefile's own `LDFLAGS`. nmap stuffs
-  # all its `-L` search paths into that Makefile variable — the in-tree
-  # nsock/nbase static libs and the `--with-liblua` lua dir (lua isn't a
-  # buildInput, so it never lands in NIX_LDFLAGS) — so overriding it drops them
-  # and the link fails on `-lnsock -lnbase -llua`. The cross targets are
-  # unaffected (they carry the lld flags via NIX_CFLAGS_LINK, which appends).
+  # nixpkgs' liblinear only builds and installs a shared `liblinear.so.5`, so a
+  # static link of `-llinear` finds no `.a` and the build fails before nmap is
+  # reached. `liblinearStatic` compiles the objects through the `predict`/`train`
+  # targets and archives them by hand (the Makefile has no `liblinear.a` target).
+  # nmap's configure then links it statically (falling back to its own bundled,
+  # identical copy if its link probe is unhappy). liblinear feeds nmap alone, so
+  # the fix lives here, inline, rather than in nix-lib. postFixup is cleared
+  # because its only content is a darwin `install_name_tool` call rewriting the
+  # now-absent liblinear dylib.
   outputs = { self, unpins-lib }:
     let
       ulib = unpins-lib.lib;
@@ -174,9 +165,8 @@
       # Build via the unpin-llvm engine so nmap links the same engine-built
       # openssl/zlib/… closure the rest of the catalog does. No `multicall`
       # block: nmap ships one binary and nothing needs its bitcode module, so
-      # `wantModule` (nix-lib/flake.nix:5098 — `multicall != null && …`) stays
-      # false and no fold pass runs at all. That is NOT a "self-fold N=1", which
-      # is what this comment used to claim.
+      # nix-lib's `wantModule` (`multicall != null && …`) stays false and no
+      # fold pass runs at all.
       engine = "unpin-llvm";
 
       # One dead store-path string survives in the static binary and must be
@@ -192,7 +182,6 @@
       # now, so that string is not in the binary at all; measured with the
       # entry dropped, the artifact still carries zero references.
       removeReferences = [ "lua-static" ];
-      optimize = { gc = false; };
       # The data tree rides the binary (see `injectVfs`). Up to v7.99-1 it was a
       # separate release asset instead, which is why that one version installs
       # as a port scanner with no NSE.
